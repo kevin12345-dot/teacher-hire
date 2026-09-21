@@ -18,6 +18,7 @@ import io
 import json
 import os
 import re
+import ssl
 import urllib.error
 import urllib.request
 import zipfile
@@ -30,7 +31,7 @@ from xml.etree import ElementTree as ET
 from bs4 import BeautifulSoup
 
 from crawler.clean import clean_text, extract_city, parse_chinese_date
-from crawler.fetch import DEFAULT_UA, FetchError, _CTX, http_get, polite_delay
+from crawler.fetch import DEFAULT_UA, FetchError, _CTX, detect_charset, polite_delay
 from crawler.sources import config as source_config
 from crawler.storage import WEB_DATA_DIR, save_json
 
@@ -102,6 +103,8 @@ ATTACH_SKIP_WORDS = [
 STATE_FILE = os.path.join(WEB_DATA_DIR, "gd-psych.json")
 KEEP_DAYS = 400          # 公告保留天数
 MAX_ROWS_PER_ITEM = 30   # 每条公告最多保留多少行心理岗位
+SCHEMA_VERSION = 2       # 数据格式版本：旧版记录会被重新检查一次（补上报名截止时间）
+MAX_TRIES = 5            # 某公告连续打不开几天后放弃
 
 
 # ---------------------------------------------------------------------------
@@ -134,31 +137,43 @@ def run(ctx) -> list[dict]:
             site_status[site["name"]] = {"ok": False, "found": 0, "message": str(e)[:150]}
             print(f"  [gd_psych] {site['name']} 失败: {e}")
 
-    # 2) 对没检查过（或上次失败）的公告，打开详情页和附件检查
-    checked_now = 0
-    seen_titles = {_title_key(a["title"]) for a in known.values()}
+    # 2) 同一公告常被多个网站转载：按标题归组，最新发布的优先检查；
+    #    某个网址打不开时自动换另一个转载网址
+    known_by_title = {_title_key(a["title"]): a for a in known.values()}
+    groups: dict[str, list[dict]] = {}
     for cand in candidates:
-        old = known.get(cand["url"])
-        if not old and _title_key(cand["title"]) in seen_titles:
-            continue  # 同一公告被多个网站转载，只保留一份
-        seen_titles.add(_title_key(cand["title"]))
-        if old and not old.get("error"):
+        groups.setdefault(_title_key(cand["title"]), []).append(cand)
+    ordered = sorted(groups.items(), key=lambda kv: max(c.get("publish_date") or "" for c in kv[1]), reverse=True)
+
+    checked_now = 0
+    for key, cands in ordered:
+        old = known_by_title.get(key)
+        if old and not old.get("error") and old.get("v", 1) >= SCHEMA_VERSION:
             continue
-        if old and old.get("tries", 0) >= 3:
+        if old and old.get("error") and old.get("tries", 0) >= MAX_TRIES:
             continue
         if checked_now >= max_new:
             break
         checked_now += 1
-        item = {**cand, "checked_at": today, "tries": (old or {}).get("tries", 0) + 1}
-        try:
-            _inspect_announcement(item, delay)
-            item.pop("error", None)
-        except Exception as e:  # noqa: BLE001
-            item["error"] = str(e)[:150]
-            item.setdefault("has_psych", False)
-            item.setdefault("psych_rows", [])
-        known[cand["url"]] = item
-        flag = "✅ 含心理岗" if item.get("has_psych") else "—"
+        tries = old.get("tries", 0) + 1 if (old and old.get("error")) else 1
+        item, errors = None, []
+        for cand in cands:
+            trial = {**cand, "checked_at": today, "tries": tries, "v": SCHEMA_VERSION}
+            try:
+                _inspect_announcement(trial, delay)
+                item = trial
+                break
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"{cand['site']}: {str(e)[:120]}")
+                polite_delay(delay, 0.5)
+        if item is None:
+            item = {**cands[0], "checked_at": today, "tries": tries, "v": SCHEMA_VERSION,
+                    "error": "；".join(errors)[:300], "has_psych": False, "psych_rows": []}
+        if old:
+            known.pop(old["url"], None)
+        known[item["url"]] = item
+        known_by_title[key] = item
+        flag = "✅ 含心理岗" if item.get("has_psych") else ("❌ 打不开" if item.get("error") else "—")
         print(f"  [gd_psych] 检查 {item['title'][:40]} {flag}")
         polite_delay(delay, 0.5)
 
@@ -196,7 +211,7 @@ def run(ctx) -> list[dict]:
             "salary_text": "事业编制",
             "subject": "心理",
             "school_level": "",
-            "deadline": "",
+            "deadline": a.get("deadline", ""),
             "publish_date": a.get("publish_date", ""),
             "crawl_date": "",
             "summary": summary,
@@ -214,7 +229,7 @@ def _scan_list(site: dict, max_pages: int, delay: float) -> list[dict]:
     for page in range(1, max_pages + 1):
         url = _page_url(site["list_url"], page)
         try:
-            html = http_get(url, delay=delay, timeout=25)
+            html = _fetch_text(url)
         except FetchError:
             if page == 1:
                 raise
@@ -273,8 +288,10 @@ def parse_list_html(html: str, page_url: str, site: dict) -> list[dict]:
             "title": title,
             "url": url,
             "site": site["name"],
-            "city": extract_city(title) or site.get("city", ""),
+            # 市/区网站直接用网站所在城市（标题里的"武汉考点"等不是工作地点）
+            "city": site["city"] if site.get("city") not in ("", "省直属") else (extract_city(title) or site.get("city", "")),
             "publish_date": date,
+            "list_page": page_url,
         })
     return out
 
@@ -283,14 +300,17 @@ def parse_list_html(html: str, page_url: str, site: dict) -> list[dict]:
 # 详情页 + 附件
 # ---------------------------------------------------------------------------
 def _inspect_announcement(item: dict, delay: float) -> None:
-    html = http_get(item["url"], delay=delay, timeout=25)
+    html, final_url = _fetch_text(item["url"], referer=item.get("list_page", ""), with_url=True)
+    item["url"] = final_url or item["url"]
     soup = BeautifulSoup(html, "html.parser")
+    body_text = soup.get_text("\n", strip=True)
 
     meta_date = soup.find("meta", attrs={"name": re.compile("PubDate", re.I)})
     if meta_date and meta_date.get("content"):
         item["publish_date"] = parse_chinese_date(meta_date["content"]) or item.get("publish_date", "")
     if not item.get("publish_date"):
-        item["publish_date"] = parse_chinese_date(soup.get_text(" ", strip=True)[:3000]) or ""
+        item["publish_date"] = parse_chinese_date(body_text[:3000]) or ""
+    item["deadline"] = extract_reg_deadline(body_text, item.get("publish_date", "")) or ""
 
     rows: list[str] = []
     checked: list[str] = []
@@ -298,7 +318,7 @@ def _inspect_announcement(item: dict, delay: float) -> None:
         if not _robots_allowed(link):
             continue
         try:
-            data = http_get_bytes(link)
+            data = _fetch_bytes(link, referer=item["url"])
         except FetchError:
             checked.append(f"{name}（下载失败）")
             continue
@@ -306,15 +326,56 @@ def _inspect_announcement(item: dict, delay: float) -> None:
         rows.extend(psych_rows_from_file(name, data))
         polite_delay(delay, 0.3)
 
-    # 标题本身就写了心理岗（如"招聘心理健康教育教师"）
+    # 有些公告直接把岗位表放在网页正文的表格里
+    for tr in soup.find_all("tr"):
+        line = _join(td.get_text(" ", strip=True) for td in tr.find_all(["td", "th"]))
+        if psych_hit(line):
+            rows.append(line)
+    # 没有附件时，逐行看正文（如"招聘心理教师 2 名"）
+    if not checked:
+        for line in body_text.split("\n"):
+            line = clean_text(line)
+            if 4 <= len(line) <= 240 and psych_hit(line):
+                rows.append(line)
+
     if psych_hit(item["title"]) and not rows:
         rows.append(item["title"])
 
     item["attachments_checked"] = checked[:10]
     item["psych_rows"] = _dedupe(rows)[:MAX_ROWS_PER_ITEM]
     item["has_psych"] = bool(item["psych_rows"])
-    if not checked:
+    item.pop("note", None)
+    if not checked and not item["has_psych"]:
         item["note"] = "没找到可读取的附件，建议打开原文人工查看"
+
+
+_DATE = r"(?:(20\d{2})\s*年)?\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
+_REG_RANGE = re.compile(r"报名(?:时间|日期|期限)?[^。；;\n]{0,20}?" + _DATE + r"[^。；;\n]{0,30}?(?:至|到|—|－|-|~|～)\s*" + _DATE)
+_REG_END = re.compile(r"报名截止(?:时间|日期)?[^。；;\n]{0,10}?" + _DATE)
+
+
+def extract_reg_deadline(text: str, publish_date: str = "") -> str | None:
+    """从正文里找报名截止日期，如"报名时间：2026年9月15日9:00至9月22日17:00" → 2026-09-22。"""
+    pub_year = int(publish_date[:4]) if publish_date[:4].isdigit() else datetime.now(timezone.utc).year
+    m = _REG_RANGE.search(text)
+    if m:
+        y1, m1, _d1, y2, m2, d2 = m.groups()
+        year = int(y2 or y1 or pub_year)
+        if not y2 and not y1 and publish_date[5:7].isdigit() and int(m2) < int(publish_date[5:7]):
+            year += 1  # 12 月发布、次年 1 月截止
+        return _iso(year, m2, d2)
+    m = _REG_END.search(text)
+    if m:
+        y, mo, d = m.groups()
+        return _iso(int(y or pub_year), mo, d)
+    return None
+
+
+def _iso(y, m, d) -> str | None:
+    try:
+        return datetime(int(y), int(m), int(d)).strftime("%Y-%m-%d")
+    except ValueError:
+        return None
 
 
 def find_attachments(soup: BeautifulSoup, page_url: str) -> list[tuple[str, str]]:
@@ -338,17 +399,76 @@ def find_attachments(soup: BeautifulSoup, page_url: str) -> list[tuple[str, str]
     return found[:8]
 
 
-def http_get_bytes(url: str, timeout: int = 40, max_bytes: int = 20_000_000, retries: int = 2) -> bytes:
-    last = None
-    for attempt in range(retries + 1):
+def _legacy_ssl_ctx() -> ssl.SSLContext:
+    """兼容老旧政府网站的 TLS 设置（解决 BAD_ECPOINT 等握手错误）。"""
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    for fn in (lambda: ctx.set_ciphers("DEFAULT:@SECLEVEL=1"),
+               lambda: setattr(ctx, "maximum_version", ssl.TLSVersion.TLSv1_2),
+               lambda: ctx.set_ecdh_curve("prime256v1")):
         try:
-            req = urllib.request.Request(url, headers={"User-Agent": DEFAULT_UA, "Accept-Language": "zh-CN,zh;q=0.9"})
-            with urllib.request.urlopen(req, timeout=timeout, context=_CTX) as resp:
-                return resp.read(max_bytes)
-        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError) as e:
+            fn()
+        except (ValueError, ssl.SSLError, AttributeError):
+            pass
+    return ctx
+
+
+_LEGACY_CTX = _legacy_ssl_ctx()
+
+
+def _swap_scheme(url: str) -> str:
+    if url.startswith("https://"):
+        return "http://" + url[len("https://"):]
+    if url.startswith("http://"):
+        return "https://" + url[len("http://"):]
+    return url
+
+
+def _request(url: str, referer: str = "", max_bytes: int = 20_000_000, timeout: int = 30):
+    """依次尝试：原网址 → 兼容模式 TLS → 换 http/https → 两者结合。返回 (内容, 最终网址, 编码)。"""
+    alt = _swap_scheme(url)
+    variants = [(url, _CTX), (url, _LEGACY_CTX), (alt, _CTX), (alt, _LEGACY_CTX)]
+    tried: set[str] = set()
+    last: Exception | None = None
+    for i, (u, ctx) in enumerate(variants):
+        sig = u if u.startswith("http://") else f"{u}|{id(ctx)}"
+        if sig in tried:
+            continue
+        tried.add(sig)
+        headers = {
+            "User-Agent": DEFAULT_UA,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        if referer:
+            headers["Referer"] = referer
+        try:
+            req = urllib.request.Request(u, headers=headers)
+            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                return resp.read(max_bytes), resp.geturl(), resp.headers.get_content_charset()
+        except urllib.error.HTTPError as e:
             last = e
-            polite_delay(1.5 * (attempt + 1), 0.5)
-    raise FetchError(f"下载失败: {url} -> {last}")
+            if e.code in (404, 410):
+                break
+        except Exception as e:  # noqa: BLE001 - 连接被重置 / TLS 握手失败等，换方式再试
+            last = e
+        polite_delay(1.5 + i, 0.8)
+    raise FetchError(f"GET 失败: {url} -> {last}")
+
+
+def _fetch_text(url: str, referer: str = "", with_url: bool = False):
+    raw, final_url, enc = _request(url, referer=referer, max_bytes=5_000_000)
+    enc = enc or detect_charset(raw) or "utf-8"
+    try:
+        text = raw.decode(enc, "ignore")
+    except LookupError:
+        text = raw.decode("utf-8", "ignore")
+    return (text, final_url) if with_url else text
+
+
+def _fetch_bytes(url: str, referer: str = "") -> bytes:
+    return _request(url, referer=referer)[0]
 
 
 # ---------------------------------------------------------------------------
