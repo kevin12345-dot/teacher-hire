@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>广东心理教师编制追踪</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌱</text></svg>">
+<style>
+  :root {
+    --paper: #F5F8F7;
+    --ink: #1C2A29;
+    --muted: #5B6C69;
+    --teal: #1F6B65;
+    --mint: #D3ECE5;
+    --amber: #9A5B14;
+    --line: #D6E0DD;
+    --panel: #FFFFFF;
+    --serif: "Songti SC", "STSong", "Noto Serif CJK SC", "Source Han Serif SC", "SimSun", serif;
+    --sans: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Hiragino Sans GB", sans-serif;
+    box-sizing: border-box;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --paper: #121A19; --ink: #E3ECEA; --muted: #9AABA7; --teal: #7CC7BC;
+      --mint: #1E3D38; --amber: #E0A45C; --line: #2A3836; --panel: #182221;
+    }
+  }
+  *, *::before, *::after { box-sizing: inherit; }
+  html, body { margin: 0; }
+  body { background: var(--paper); color: var(--ink); font: 16px/1.7 var(--sans); }
+  a { color: var(--teal); }
+  a:focus-visible, button:focus-visible, input:focus-visible, summary:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+  .wrap { max-width: 780px; margin: 0 auto; padding: 40px 20px 64px; }
+
+  header h1 { font: 700 clamp(28px, 6vw, 40px)/1.25 var(--serif); margin: 0 0 10px; letter-spacing: 0.02em; }
+  header p { margin: 0; color: var(--muted); max-width: 36em; }
+  .status { margin-top: 14px; font-size: 14px; color: var(--muted); }
+  .status strong { color: var(--ink); font-weight: 600; }
+
+  .filters { margin: 32px 0 8px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+  .chip { border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 999px; padding: 4px 14px; font: inherit; font-size: 14px; cursor: pointer; }
+  .chip[aria-pressed="true"] { background: var(--teal); border-color: var(--teal); color: var(--paper); }
+  .search { display: block; width: 100%; max-width: 420px; margin-top: 4px; border: 1px solid var(--line); background: var(--panel); color: var(--ink); border-radius: 8px; padding: 7px 12px; font: inherit; font-size: 15px; }
+
+  h2 { font: 700 21px/1.4 var(--serif); margin: 44px 0 4px; }
+  .hint { color: var(--muted); font-size: 14px; margin: 0 0 12px; }
+
+  .item { border-top: 1px solid var(--line); padding: 20px 0 18px; }
+  .item:last-child { border-bottom: 1px solid var(--line); }
+  .item h3 { font-size: 17px; line-height: 1.5; margin: 0; font-weight: 600; }
+  .item h3 a { color: var(--ink); text-decoration: none; }
+  .item h3 a:hover { text-decoration: underline; color: var(--teal); }
+  .meta { font-size: 13px; color: var(--muted); margin-top: 4px; display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .new { color: var(--amber); font-weight: 600; }
+  .posts { list-style: none; margin: 12px 0 0; padding: 0; }
+  .posts li { font-size: 14px; line-height: 1.6; padding: 7px 12px; background: var(--panel); border-left: 3px solid var(--teal); margin-bottom: 6px; overflow-wrap: anywhere; }
+  mark { background: var(--mint); color: inherit; padding: 0; border-radius: 2px; }
+  .more { font: inherit; font-size: 13px; background: none; border: 0; color: var(--teal); cursor: pointer; padding: 2px 0; }
+  .note { font-size: 13px; color: var(--amber); margin-top: 8px; }
+
+  details { margin-top: 36px; border-top: 1px solid var(--line); padding-top: 14px; }
+  summary { cursor: pointer; font: 600 17px/1.5 var(--serif); }
+  details .inner { margin-top: 10px; }
+  .src { font-size: 14px; padding: 6px 0; border-bottom: 1px dashed var(--line); display: flex; justify-content: space-between; gap: 12px; }
+  .src .bad { color: var(--amber); }
+  .plain { font-size: 14px; padding: 8px 0; border-bottom: 1px dashed var(--line); }
+  .plain small { color: var(--muted); }
+
+  .empty { padding: 28px 0; color: var(--muted); border-top: 1px solid var(--line); }
+  footer { margin-top: 56px; font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>广东心理教师编制追踪</h1>
+    <p>每天自动检查广东各地教育局的教师招聘公告，打开附件里的岗位表，把心理健康教育、心理学专业相关的岗位挑出来。</p>
+    <div class="status" id="status">正在读取数据…</div>
+  </header>
+
+  <div class="filters" id="filters" role="group" aria-label="按城市筛选"></div>
+  <input class="search" id="q" type="search" placeholder="搜学校、区或岗位，如：天河、小学" aria-label="搜索">
+
+  <h2>编制公告里的心理岗位</h2>
+  <p class="hint">每条都是官方公告，下面列出岗位表中含“心理”的行。报名前请点开原文核对条件。</p>
+  <div id="official"></div>
+
+  <h2>招聘网站上的广东心理老师岗位</h2>
+  <p class="hint">来自万行教师人才网等招聘网站，多为民办学校，一般不是编制岗位。</p>
+  <div id="others"></div>
+
+  <details>
+    <summary>检查过、暂未发现心理岗的公告</summary>
+    <div class="inner" id="checked"></div>
+  </details>
+
+  <details>
+    <summary>数据来源运行情况</summary>
+    <div class="inner" id="sources"></div>
+  </details>
+
+  <footer>数据来自政府网站公开信息，仅作整理提醒，一切以官方原文为准。<a href="./">返回全国教师招聘</a></footer>
+</div>
+
+<script>
+"use strict";
+const state = { city: "全部", q: "", psych: [], others: [], checked: [], latest: "" };
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const hl = (s) => esc(s).replace(/心理/g, "<mark>心理</mark>");
+const getJSON = (u) => fetch(u, { cache: "no-cache" }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+
+async function load() {
+  const [gd, j910, yjs] = await Promise.all([
+    getJSON("data/gd-psych.json"), getJSON("data/jobs-job910.json"), getJSON("data/jobs-yjszp.json"),
+  ]);
+  const anns = (gd && gd.announcements) || [];
+  state.latest = (gd && gd.latest_check_date) || "";
+  state.psych = anns.filter((a) => a.has_psych);
+  state.checked = anns.filter((a) => !a.has_psych);
+  const jobs = [...((j910 && j910.jobs) || []), ...((yjs && yjs.jobs) || [])];
+  state.others = jobs.filter((j) => j.province === "广东" && /心理/.test((j.title || "") + (j.subject || "") + (j.summary || "")));
+
+  const status = document.getElementById("status");
+  if (!gd) {
+    status.textContent = "还没有数据。爬虫每天北京时间 15:00 左右运行一次，运行完成后刷新本页即可。";
+  } else {
+    const t = gd.updated_at ? new Date(gd.updated_at).toLocaleString("zh-CN", { hour12: false }) : "未知";
+    status.innerHTML = `最近更新 <strong>${esc(t)}</strong>，共检查 ${anns.length} 份公告，其中 <strong>${state.psych.length}</strong> 份含心理岗位。`;
+  }
+  renderSources((gd && gd.sites) || {});
+  renderFilters();
+  render();
+}
+
+function cities() {
+  const set = new Set();
+  [...state.psych, ...state.others].forEach((x) => x.city && set.add(x.city));
+  return ["全部", ...[...set].sort((a, b) => a.localeCompare(b, "zh-CN"))];
+}
+
+function renderFilters() {
+  const box = document.getElementById("filters");
+  box.innerHTML = cities().map((c) => `<button class="chip" type="button" aria-pressed="${c === state.city}" data-city="${esc(c)}">${esc(c)}</button>`).join("");
+  box.onclick = (e) => {
+    const b = e.target.closest("button[data-city]");
+    if (!b) return;
+    state.city = b.dataset.city;
+    renderFilters();
+    render();
+  };
+}
+
+function match(x, text) {
+  if (state.city !== "全部" && x.city !== state.city) return false;
+  return !state.q || text.toLowerCase().includes(state.q.toLowerCase());
+}
+
+function render() {
+  const off = state.psych.filter((a) => match(a, [a.title, a.site, ...(a.psych_rows || [])].join(" ")));
+  document.getElementById("official").innerHTML = off.length
+    ? off.map(renderAnn).join("")
+    : `<div class="empty">${state.psych.length ? "没有符合筛选条件的公告，换个城市或关键词试试。" : "暂时还没发现含心理岗位的编制公告。招聘多集中在每年 1–6 月，系统会每天继续检查。"}</div>`;
+
+  const oth = state.others.filter((j) => match(j, [j.title, j.school, j.summary].join(" ")));
+  document.getElementById("others").innerHTML = oth.length
+    ? oth.slice(0, 80).map((j) => `
+      <div class="item">
+        <h3><a href="${esc(j.url)}" target="_blank" rel="noopener">${hl(j.title)}</a></h3>
+        <div class="meta"><span>${esc(j.school || "")}</span><span>${esc(j.city || "")}</span><span>${esc(j.salary_text || "")}</span><span>${esc(j.publish_date || "")}</span><span>${esc(j.source_label || "")}</span></div>
+      </div>`).join("")
+    : `<div class="empty">没有符合条件的岗位。</div>`;
+
+  const chk = state.checked.filter((a) => match(a, a.title));
+  document.getElementById("checked").innerHTML = chk.length
+    ? chk.map((a) => `<div class="plain"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a><br><small>${esc(a.site)}　${esc(a.publish_date || "")}${a.error ? "　读取失败，明天会重试" : ""}${a.note ? "　" + esc(a.note) : ""}</small></div>`).join("")
+    : `<div class="plain"><small>暂无</small></div>`;
+}
+
+function renderAnn(a) {
+  const rows = a.psych_rows || [];
+  const isNew = a.checked_at && a.checked_at === state.latest;
+  const first = rows.slice(0, 4).map((r) => `<li>${hl(r)}</li>`).join("");
+  const rest = rows.slice(4).map((r) => `<li hidden>${hl(r)}</li>`).join("");
+  return `
+    <article class="item">
+      <h3><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a></h3>
+      <div class="meta">
+        ${isNew ? '<span class="new">今日新发现</span>' : ""}
+        <span>${esc(a.city || "")}</span><span>${esc(a.site || "")}</span><span>发布 ${esc(a.publish_date || "未知")}</span>
+        <span>心理相关 ${rows.length} 行</span>
+      </div>
+      <ul class="posts">${first}${rest}</ul>
+      ${rows.length > 4 ? `<button class="more" type="button" onclick="showAll(this)">展开其余 ${rows.length - 4} 行</button>` : ""}
+    </article>`;
+}
+
+function showAll(btn) {
+  btn.previousElementSibling.querySelectorAll("li[hidden]").forEach((li) => (li.hidden = false));
+  btn.remove();
+}
+
+function renderSources(sites) {
+  const names = Object.keys(sites);
+  document.getElementById("sources").innerHTML = names.length
+    ? names.map((n) => {
+        const s = sites[n];
+        const right = s.ok ? `找到 ${s.found} 份招聘公告` : `<span class="bad">${esc(s.message || "失败")}</span>`;
+        return `<div class="src"><span>${esc(n)}</span><span>${right}</span></div>`;
+      }).join("")
+    : `<div class="plain"><small>还没有运行记录</small></div>`;
+}
+
+document.getElementById("q").addEventListener("input", (e) => { state.q = e.target.value.trim(); render(); });
+load();
+</script>
+</body>
+</html>
