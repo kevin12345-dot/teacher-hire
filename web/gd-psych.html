@@ -58,6 +58,10 @@
   .posts li { font-size: 14px; line-height: 1.6; padding: 7px 12px; background: var(--panel); border-left: 3px solid var(--teal); margin-bottom: 6px; overflow-wrap: anywhere; }
   mark { background: var(--mint); color: inherit; padding: 0; border-radius: 2px; }
   .more { font: inherit; font-size: 13px; background: none; border: 0; color: var(--teal); cursor: pointer; padding: 2px 0; }
+  .open { color: var(--teal); font-weight: 600; }
+  .closed { color: var(--muted); }
+  .past { margin-top: 20px; }
+  .past .item { opacity: 0.85; }
   .note { font-size: 13px; color: var(--amber); margin-top: 8px; }
 
   details { margin-top: 36px; border-top: 1px solid var(--line); padding-top: 14px; }
@@ -84,8 +88,13 @@
   <input class="search" id="q" type="search" placeholder="搜学校、区或岗位，如：天河、小学" aria-label="搜索">
 
   <h2>编制公告里的心理岗位</h2>
-  <p class="hint">每条都是官方公告，下面列出岗位表中含“心理”的行。报名前请点开原文核对条件。</p>
+  <p class="hint">正在报名或近 45 天内发布的官方公告，下面列出岗位表中含“心理”的行。报名前请点开原文核对条件。</p>
   <div id="official"></div>
+  <details class="past" id="pastWrap">
+    <summary id="pastTitle">往期公告</summary>
+    <p class="hint">报名已经结束，但能看出哪些学校、每年大概什么时候招心理老师。</p>
+    <div class="inner" id="past"></div>
+  </details>
 
   <h2>招聘网站上的广东心理老师岗位</h2>
   <p class="hint">来自万行教师人才网等招聘网站，多为民办学校，一般不是编制岗位。</p>
@@ -128,7 +137,7 @@ async function load() {
     status.textContent = "还没有数据。爬虫每天北京时间 15:00 左右运行一次，运行完成后刷新本页即可。";
   } else {
     const t = gd.updated_at ? new Date(gd.updated_at).toLocaleString("zh-CN", { hour12: false }) : "未知";
-    status.innerHTML = `最近更新 <strong>${esc(t)}</strong>，共检查 ${anns.length} 份公告，其中 <strong>${state.psych.length}</strong> 份含心理岗位。`;
+    status.innerHTML = `最近更新 <strong>${esc(t)}</strong>，每天北京时间 15:00 左右自动更新。已检查 ${anns.length} 份公告，其中 <strong>${state.psych.length}</strong> 份含心理岗位。`;
   }
   renderSources((gd && gd.sites) || {});
   renderFilters();
@@ -160,9 +169,13 @@ function match(x, text) {
 
 function render() {
   const off = state.psych.filter((a) => match(a, [a.title, a.site, ...(a.psych_rows || [])].join(" ")));
-  document.getElementById("official").innerHTML = off.length
-    ? off.map(renderAnn).join("")
-    : `<div class="empty">${state.psych.length ? "没有符合筛选条件的公告，换个城市或关键词试试。" : "暂时还没发现含心理岗位的编制公告。招聘多集中在每年 1–6 月，系统会每天继续检查。"}</div>`;
+  const cur = off.filter(isCurrent);
+  const past = off.filter((a) => !isCurrent(a));
+  document.getElementById("official").innerHTML = cur.length
+    ? cur.map(renderAnn).join("")
+    : `<div class="empty">${state.psych.length ? "目前没有正在报名的心理岗位。广东的编制招聘多集中在每年 1–6 月，秋季也有少量批次，系统每天会继续检查。" : "暂时还没发现含心理岗位的编制公告，系统每天会继续检查。"}</div>`;
+  document.getElementById("pastTitle").textContent = `往期公告（${past.length}）`;
+  document.getElementById("past").innerHTML = past.map(renderAnn).join("") || '<div class="plain"><small>暂无</small></div>';
 
   const oth = state.others.filter((j) => match(j, [j.title, j.school, j.summary].join(" ")));
   document.getElementById("others").innerHTML = oth.length
@@ -175,13 +188,27 @@ function render() {
 
   const chk = state.checked.filter((a) => match(a, a.title));
   document.getElementById("checked").innerHTML = chk.length
-    ? chk.map((a) => `<div class="plain"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a><br><small>${esc(a.site)}　${esc(a.publish_date || "")}${a.error ? "　读取失败，明天会重试" : ""}${a.note ? "　" + esc(a.note) : ""}</small></div>`).join("")
+    ? chk.map((a) => `<div class="plain"><a href="${esc(a.url)}" target="_blank" rel="noopener">${esc(a.title)}</a><br><small>${esc(a.site)}　${esc(a.publish_date || "")}${a.error ? "　网站暂时打不开，明天会自动重试" : ""}${a.note ? "　" + esc(a.note) : ""}</small></div>`).join("")
     : `<div class="plain"><small>暂无</small></div>`;
+}
+
+function daysAgo(d) {
+  if (!d) return 9999;
+  return (Date.now() - new Date(d + "T00:00:00+08:00").getTime()) / 86400000;
+}
+function isCurrent(a) {
+  if (a.deadline) return daysAgo(a.deadline) < 1;
+  return daysAgo(a.publish_date) <= 45;
+}
+function regLabel(a) {
+  if (!a.deadline) return '<span>报名截止时间未识别</span>';
+  const md = `${+a.deadline.slice(5, 7)}月${+a.deadline.slice(8, 10)}日`;
+  return daysAgo(a.deadline) < 1 ? `<span class="open">报名中，${md}截止</span>` : `<span class="closed">已于${md}截止</span>`;
 }
 
 function renderAnn(a) {
   const rows = a.psych_rows || [];
-  const isNew = a.checked_at && a.checked_at === state.latest;
+  const isNew = a.checked_at && a.checked_at === state.latest && daysAgo(a.publish_date) <= 14;
   const first = rows.slice(0, 4).map((r) => `<li>${hl(r)}</li>`).join("");
   const rest = rows.slice(4).map((r) => `<li hidden>${hl(r)}</li>`).join("");
   return `
@@ -190,7 +217,7 @@ function renderAnn(a) {
       <div class="meta">
         ${isNew ? '<span class="new">今日新发现</span>' : ""}
         <span>${esc(a.city || "")}</span><span>${esc(a.site || "")}</span><span>发布 ${esc(a.publish_date || "未知")}</span>
-        <span>心理相关 ${rows.length} 行</span>
+        ${regLabel(a)}<span>心理相关 ${rows.length} 行</span>
       </div>
       <ul class="posts">${first}${rest}</ul>
       ${rows.length > 4 ? `<button class="more" type="button" onclick="showAll(this)">展开其余 ${rows.length - 4} 行</button>` : ""}
