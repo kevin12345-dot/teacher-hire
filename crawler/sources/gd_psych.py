@@ -50,11 +50,30 @@ except ImportError:  # pragma: no cover
 # 大部分广东政府网站用同一套系统，翻页规则是 index.html → index_2.html → index_3.html
 # ---------------------------------------------------------------------------
 SITES = [
+    # ---- 省级 ----
+    {"name": "广东省人社厅·事业单位招聘", "list_url": "https://hrss.gd.gov.cn/zwgk/sydwzp/zpgg/index.html", "city": "省直属"},
+    # ---- 广州 ----
     {"name": "广州市教育局·通知公告", "list_url": "https://jyj.gz.gov.cn/yw/tzgg/index.html", "city": "广州"},
+    {"name": "广州市人社局·事业单位招聘", "list_url": "https://rsj.gz.gov.cn/ywzt/rszdgg/sydwgkzp/sydwzpgg/index.html", "city": "广州"},
+    {"name": "广州天河区·人事招聘", "list_url": "http://www.thnet.gov.cn/thdt/tzgg/rsxx/rszp/index.html", "city": "广州"},
+    {"name": "广州天河区教育局·人事招聘", "list_url": "http://www.thnet.gov.cn/gzjg/qzf/qjyj/tzgg/rszp/index.html", "city": "广州"},
+    {"name": "广州海珠区教育局·教师", "list_url": "https://www.haizhu.gov.cn/gzjg/qzf/hzqjyj/js/index.html", "city": "广州"},
+    {"name": "广州海珠区·招聘信息", "list_url": "http://www.haizhu.gov.cn/hzdt/tzgg/zpxx/index.html", "city": "广州"},
     {"name": "广州番禺区·招考信息", "list_url": "https://www.panyu.gov.cn/zwgk/rsgk/zkxx/index.html", "city": "广州"},
     {"name": "广州黄埔区·招聘公告", "list_url": "http://www.hp.gov.cn/xwzx/tzgg/zpgg/index.html", "city": "广州"},
     {"name": "广州增城区教育局·通知公告", "list_url": "http://www.zc.gov.cn/jg/qzfbm/qjyj/tzgg/index.html", "city": "广州"},
+    # ---- 深圳 ----
     {"name": "深圳市教育局·公办学校招聘", "list_url": "https://szeb.sz.gov.cn/home/xxgk/zthd/jszp/gbxx/index.html", "city": "深圳"},
+    {"name": "深圳市教育局·人员招聘", "list_url": "https://szeb.sz.gov.cn/home/xxgk/flzy/rsxx2/ryzp/index.html", "city": "深圳"},
+    {"name": "深圳福田区·招考专栏", "list_url": "https://www.szft.gov.cn/xxgk/ztbd/ftqzkzl/index.html", "city": "深圳"},
+    {"name": "深圳龙华区·招考招聘", "list_url": "https://www.szlhq.gov.cn/xxgk/rsxx/zkzp/index.html", "city": "深圳"},
+    {"name": "深圳龙华区教育局·招聘信息", "list_url": "http://www.szlhq.gov.cn/bmxxgk/jyj/dtxx_124232/zpxx/index.html", "city": "深圳"},
+    # ---- 珠海 ----
+    {"name": "珠海市教育局·人事信息", "list_url": "https://zhjy.zhuhai.gov.cn/zwgk/rsxx/index.html", "city": "珠海"},
+    {"name": "珠海市教育局·教师队伍", "list_url": "https://zhjy.zhuhai.gov.cn/ywgz/jsdw/index.html", "city": "珠海"},
+    {"name": "珠海市人社局·公职招考", "list_url": "https://zhrsj.zhuhai.gov.cn/zw/tzgg/gzzk/index.html", "city": "珠海"},
+    {"name": "珠海市政府·公职招考", "list_url": "https://www.zhuhai.gov.cn/zw/rsxx/gzzk/index.html", "city": "珠海"},
+    # ---- 东莞（这两个网站的 robots.txt 可能不允许爬取，会被自动跳过） ----
     {"name": "东莞市教育局·公示公告", "list_url": "https://edu.dg.gov.cn/jyzx/gsgg/index.html", "city": "东莞"},
     {"name": "东莞市人社局·公开招聘", "list_url": "https://dghrss.dg.gov.cn/xwzx/gsgg/gkzp/index.html", "city": "东莞"},
 ]
@@ -117,8 +136,12 @@ def run(ctx) -> list[dict]:
 
     # 2) 对没检查过（或上次失败）的公告，打开详情页和附件检查
     checked_now = 0
+    seen_titles = {_title_key(a["title"]) for a in known.values()}
     for cand in candidates:
         old = known.get(cand["url"])
+        if not old and _title_key(cand["title"]) in seen_titles:
+            continue  # 同一公告被多个网站转载，只保留一份
+        seen_titles.add(_title_key(cand["title"]))
         if old and not old.get("error"):
             continue
         if old and old.get("tries", 0) >= 3:
@@ -487,6 +510,10 @@ def _binary_snippets(data: bytes) -> list[str]:
         if out:
             break
     return out
+
+
+def _title_key(title: str) -> str:
+    return re.sub(r"[\s（）()“”\"'《》【】\[\]·、，,:：-]", "", title)
 
 
 def _dedupe(rows: list[str]) -> list[str]:
