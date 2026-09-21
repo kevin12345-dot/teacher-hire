@@ -30,6 +30,13 @@ SOURCES = {
         "delay": 1.0,
         "max_pages": 3,
     },
+    # 广东各市/区教育局编制公告 · 心理岗位专项（会下载附件岗位表查找"心理"）
+    "gd_psych": {
+        "enabled": True,
+        "max_pages": 3,           # 每个网站翻几页列表
+        "max_new_per_run": 40,    # 每次最多新检查多少条公告（控制运行时间）
+        "delay": 1.5,
+    },
     # 中国教师招聘网（GBK 编码，国际学校/民办为主，质量一般，默认关闭）
     "chinajob": {
         "enabled": False,
@@ -47,5 +54,6 @@ SOURCE_LABELS = {
     "jybzp": "教育部人才服务网",
     "yjszp": "应届生招聘网",
     "prov_bureau": "省厅公告",
+    "gd_psych": "广东官网·心理岗",
     "chinajob": "中国教师招聘网",
 }
