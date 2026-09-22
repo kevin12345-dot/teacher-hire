@@ -40,6 +40,11 @@ try:  # 读取老版 .xls 岗位表；没装也能运行，只是改用粗略的
 except ImportError:  # pragma: no cover
     xlrd = None
 
+try:  # 模拟真实 Chrome 浏览器的网络特征（部分政府网站会拦截"不像浏览器"的访问）
+    from curl_cffi import requests as _creq  # type: ignore
+except ImportError:  # pragma: no cover
+    _creq = None
+
 try:  # 读取 PDF 岗位表（可选）
     from pypdf import PdfReader  # type: ignore
 except ImportError:  # pragma: no cover
@@ -185,6 +190,7 @@ def run(ctx) -> list[dict]:
         "updated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "latest_check_date": today,
         "sites": site_status,
+        "fetch_stats": HOST_STATS,
         "announcements": announcements,
     }
     save_json(STATE_FILE, state)
@@ -425,12 +431,55 @@ def _swap_scheme(url: str) -> str:
     return url
 
 
+_CSESSION = None
+HOST_STATS: dict[str, dict] = {}   # 每个网站用哪种方式成功/失败，保存到结果文件里方便排查
+
+
+def _session():
+    """浏览器模拟会话：会保存 Cookie，访问详情页时像真人一样"先看列表再点进去"。"""
+    global _CSESSION
+    if _CSESSION is None and _creq is not None:
+        try:
+            _CSESSION = _creq.Session(impersonate="chrome")
+        except Exception:  # noqa: BLE001
+            _CSESSION = False
+    return _CSESSION or None
+
+
+def _stat(url: str, key: str, err: Exception | None = None) -> None:
+    host = urlparse(url).netloc
+    st = HOST_STATS.setdefault(host, {"browser_ok": 0, "urllib_ok": 0, "fail": 0, "last_error": ""})
+    st[key] += 1
+    if err is not None:
+        st["last_error"] = str(err)[:160]
+
+
 def _request(url: str, referer: str = "", max_bytes: int = 20_000_000, timeout: int = 30):
-    """依次尝试：原网址 → 兼容模式 TLS → 换 http/https → 两者结合。返回 (内容, 最终网址, 编码)。"""
+    """依次尝试：浏览器模拟 → 普通方式 → 兼容模式 TLS → 换 http/https。返回 (内容, 最终网址, 编码)。"""
     alt = _swap_scheme(url)
+    last: Exception | None = None
+
+    sess = _session()
+    if sess is not None:
+        for u in (url, alt):
+            try:
+                headers = {"Accept-Language": "zh-CN,zh;q=0.9"}
+                if referer:
+                    headers["Referer"] = referer
+                r = sess.get(u, headers=headers, timeout=timeout, verify=False, allow_redirects=True)
+                if r.status_code == 200:
+                    _stat(url, "browser_ok")
+                    m = re.search(r"charset=([\w-]+)", r.headers.get("content-type", ""), re.I)
+                    return r.content[:max_bytes], str(r.url), (m.group(1) if m else None)
+                last = Exception(f"HTTP {r.status_code}")
+                if r.status_code in (404, 410):
+                    break
+            except Exception as e:  # noqa: BLE001
+                last = e
+            polite_delay(2.0, 0.8)
+
     variants = [(url, _CTX), (url, _LEGACY_CTX), (alt, _CTX), (alt, _LEGACY_CTX)]
     tried: set[str] = set()
-    last: Exception | None = None
     for i, (u, ctx) in enumerate(variants):
         sig = u if u.startswith("http://") else f"{u}|{id(ctx)}"
         if sig in tried:
@@ -446,6 +495,7 @@ def _request(url: str, referer: str = "", max_bytes: int = 20_000_000, timeout: 
         try:
             req = urllib.request.Request(u, headers=headers)
             with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                _stat(url, "urllib_ok")
                 return resp.read(max_bytes), resp.geturl(), resp.headers.get_content_charset()
         except urllib.error.HTTPError as e:
             last = e
@@ -454,6 +504,7 @@ def _request(url: str, referer: str = "", max_bytes: int = 20_000_000, timeout: 
         except Exception as e:  # noqa: BLE001 - 连接被重置 / TLS 握手失败等，换方式再试
             last = e
         polite_delay(1.5 + i, 0.8)
+    _stat(url, "fail", last)
     raise FetchError(f"GET 失败: {url} -> {last}")
 
 
