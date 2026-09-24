@@ -9,7 +9,7 @@
 为什么要看附件：编制公告的标题通常只写"公开招聘教师 XX 名"，
 心理老师岗位几乎都藏在附件岗位表里，只看标题会全部漏掉。
 
-想加新网站：在下面 SITES 里照格式加一行即可（name / list_url / city）。
+想加新网站：在下面 SITES 里照格式加一行即可（name / list_url / city，可选 max_pages 单独指定翻页数）。
 """
 
 from __future__ import annotations
@@ -17,8 +17,10 @@ from __future__ import annotations
 import io
 import json
 import os
+import random
 import re
 import ssl
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -82,20 +84,30 @@ SITES = [
     # ---- 东莞（这两个网站的 robots.txt 可能不允许爬取，会被自动跳过） ----
     {"name": "东莞市教育局·公示公告", "list_url": "https://edu.dg.gov.cn/jyzx/gsgg/index.html", "city": "东莞"},
     {"name": "东莞市人社局·公开招聘", "list_url": "https://dghrss.dg.gov.cn/xwzx/gsgg/gkzp/index.html", "city": "东莞"},
+    # ---- 中山（教体局网站的"人事信息"只有任免通知，招聘公告都发在人社局；
+    #      该栏目大量"拟聘用名单"，教师公告常排在第 10 页以后，所以多翻几页） ----
+    {"name": "中山市人社局·事业单位公开招聘", "list_url": "https://hrss.zs.gov.cn/xxgk/rsxx/sydwgkzp/index.html", "city": "中山", "max_pages": 20},
+    # ---- 佛山 ----
+    {"name": "佛山市教育局·招聘信息", "list_url": "https://edu.foshan.gov.cn/gg/zhaopinxinxi/index.html", "city": "佛山"},
+    {"name": "佛山市人社局·机关事业单位招录", "list_url": "https://hrss.foshan.gov.cn/zwgk/jgsydwzl/index.html", "city": "佛山"},
+    # ---- 惠州 ----
+    {"name": "惠州市教育局·人事工作", "list_url": "https://jyj.huizhou.gov.cn/zwgk/rsgz/index.html", "city": "惠州"},
+    {"name": "惠州市人社局·事业单位人事管理", "list_url": "https://rsj.huizhou.gov.cn/ywzt/sydwrsgl/index.html", "city": "惠州"},
 ]
 
 # 标题必须同时满足：含"招聘类"词 + 含"教师类"词，且不含"过程类"词
 TITLE_RECRUIT_WORDS = ["招聘", "招考", "引进", "选聘"]
-TITLE_TEACHER_WORDS = ["教师", "教职员", "教职工", "教育系统", "学校", "中学", "小学", "幼儿园", "心理"]
+TITLE_TEACHER_WORDS = ["教师", "教职员", "教职工", "教育系统", "教体系统", "学校", "中学", "小学", "幼儿园", "心理"]
 TITLE_SKIP_WORDS = [
     "拟聘", "拟录用", "名单", "成绩", "面试", "体检", "考察", "资格审查", "资格复审", "资格初审",
     "递补", "分数线", "准考证", "考场", "编外", "临聘", "劳务派遣", "结果", "聘用人员公示",
+    "关于公布", "笔试", "考核公告", "考试的通知", "考试安排", "报名的通知",
 ]
 
 # 岗位表里命中"心理"，但其实与心理岗位无关的常见说法，先剔除再判断
 PSYCH_FALSE_POSITIVES = [
     "教育学、心理学", "教育学，心理学", "教育学,心理学", "教育学和心理学", "教育学与心理学",
-    "教育学心理学", "教育学及心理学", "心理素质", "心理条件", "心理健康状况", "身体和心理", "身心健康",
+    "教育学心理学", "教育学及心理学", "心理素质", "心理条件", "心理健康状况", "身体和心理", "身心健康", "运动心理学", "体育心理学", "体育与心理健康",
 ]
 
 # 附件后缀与需跳过的附件（专业参考目录里必然有"心理学"，会造成误报）
@@ -107,6 +119,7 @@ ATTACH_SKIP_WORDS = [
 
 STATE_FILE = os.path.join(WEB_DATA_DIR, "gd-psych.json")
 KEEP_DAYS = 400          # 公告保留天数
+RECENT_DAYS = 90         # 只检查最近三个月发布的公告
 MAX_ROWS_PER_ITEM = 30   # 每条公告最多保留多少行心理岗位
 SCHEMA_VERSION = 2       # 数据格式版本：旧版记录会被重新检查一次（补上报名截止时间）
 MAX_TRIES = 5            # 某公告连续打不开几天后放弃
@@ -134,7 +147,8 @@ def run(ctx) -> list[dict]:
                 site_status[site["name"]] = {"ok": False, "found": 0, "message": "该网站 robots.txt 不允许爬取，已跳过"}
                 print(f"  [gd_psych] {site['name']}: robots 不允许，跳过")
                 continue
-            items = _scan_list(site, max_pages, delay)
+            pages = max_pages if getattr(ctx, "shallow", False) else int(site.get("max_pages", max_pages))
+            items = _scan_list(site, pages, delay)
             candidates.extend(items)
             site_status[site["name"]] = {"ok": True, "found": len(items), "message": ""}
             print(f"  [gd_psych] {site['name']}: 找到教师招聘公告 {len(items)} 条")
@@ -144,7 +158,10 @@ def run(ctx) -> list[dict]:
 
     # 2) 同一公告常被多个网站转载：按标题归组，最新发布的优先检查；
     #    某个网址打不开时自动换另一个转载网址
-    known_by_title = {_title_key(a["title"]): a for a in known.values()}
+    known_by_title = {_title_key(t): a for a in known.values() for t in (a["title"], a.get("list_title")) if t}
+    # 打开后发现不是招聘公告 / 超过三个月的：只记标题，不进公告列表，也不再重复打开
+    skipped = {s["key"]: s for s in state.get("skipped", [])}
+    recent_cutoff = _recent_cutoff()
     groups: dict[str, list[dict]] = {}
     for cand in candidates:
         groups.setdefault(_title_key(cand["title"]), []).append(cand)
@@ -152,6 +169,11 @@ def run(ctx) -> list[dict]:
 
     checked_now = 0
     for key, cands in ordered:
+        if key in skipped:
+            continue
+        list_date = max(c.get("publish_date") or "" for c in cands)
+        if list_date and list_date < recent_cutoff:
+            continue  # 列表页日期已超过三个月，不用打开
         old = known_by_title.get(key)
         if old and not old.get("error") and old.get("v", 1) >= SCHEMA_VERSION:
             continue
@@ -168,12 +190,27 @@ def run(ctx) -> list[dict]:
                 _inspect_announcement(trial, delay)
                 item = trial
                 break
+            except HostPaused:
+                pass
             except Exception as e:  # noqa: BLE001
                 errors.append(f"{cand['site']}: {str(e)[:120]}")
                 polite_delay(delay, 0.5)
+        if item is None and not errors:
+            # 所有转载网址所在网站都已暂停访问：本次没真正检查，不计入失败次数，留到下次
+            checked_now -= 1
+            print(f"  [gd_psych] 跳过 {cands[0]['title'][:40]}（网站暂停访问，下次再查）")
+            continue
         if item is None:
             item = {**cands[0], "checked_at": today, "tries": tries, "v": SCHEMA_VERSION,
                     "error": "；".join(errors)[:300], "has_psych": False, "psych_rows": []}
+        if item.get("skip_reason"):
+            skipped[key] = {"key": key, "title": item["title"], "url": item["url"],
+                            "reason": item["skip_reason"], "checked_at": today}
+            if old:
+                known.pop(old["url"], None)
+            print(f"  [gd_psych] 检查 {item['title'][:40]} 跳过：{item['skip_reason']}")
+            polite_delay(delay, 0.5)
+            continue
         if old:
             known.pop(old["url"], None)
         known[item["url"]] = item
@@ -192,6 +229,7 @@ def run(ctx) -> list[dict]:
         "sites": site_status,
         "fetch_stats": HOST_STATS,
         "announcements": announcements,
+        "skipped": [s for s in skipped.values() if s.get("checked_at", today) >= cutoff],
     }
     save_json(STATE_FILE, state)
 
@@ -241,14 +279,28 @@ def _scan_list(site: dict, max_pages: int, delay: float) -> list[dict]:
                 raise
             break
         items = parse_list_html(html, url, site)
-        if not items:
-            break
         for it in items:
             if it["url"] not in seen:
                 seen.add(it["url"])
                 out.append(it)
+        # 本页所有文章都早于三个月就不再往后翻。注意不能"本页没有教师公告就停"：
+        # 暑期前几页常被"拟聘用人员公示"占满，真正的招聘公告在第 2 页以后
+        newest = _newest_date(html)
+        if (newest and newest < _recent_cutoff()) or (not newest and not items):
+            break  # 列表页不写日期的，沿用"本页没有教师公告就停"
         polite_delay(delay, 0.4)
     return out
+
+
+def _newest_date(html: str) -> str:
+    """列表页上所有文章里最新的发布日期（没有日期时返回空）。"""
+    soup = BeautifulSoup(html, "html.parser")
+    dates = []
+    for a in soup.find_all("a", href=True):
+        row = a.find_parent(["li", "tr"])
+        if row:
+            dates.append(parse_chinese_date(row.get_text(" ", strip=True)) or "")
+    return max(dates, default="")
 
 
 def _page_url(list_url: str, page: int) -> str:
@@ -311,22 +363,41 @@ def _inspect_announcement(item: dict, delay: float) -> None:
     soup = BeautifulSoup(html, "html.parser")
     body_text = soup.get_text("\n", strip=True)
 
+    # 列表页标题常被截断（"关于公布……（广州场）..."），用详情页的完整标题再筛一次：
+    # 名单/成绩类通知的附件是应聘者个人名单，既不是岗位表，也不应展示
+    meta_title = soup.find("meta", attrs={"name": re.compile("^ArticleTitle$", re.I)})
+    full_title = clean_text(meta_title.get("content", "")) if meta_title else ""
+    if full_title:
+        if full_title != item["title"]:
+            item["list_title"] = item["title"]  # 下次按列表页标题也能认出这条
+            item["title"] = full_title
+        if not is_teacher_recruit_title(full_title):
+            item["skip_reason"] = "名单/成绩/考试安排类通知，不是招聘公告"
+            return
+
     meta_date = soup.find("meta", attrs={"name": re.compile("PubDate", re.I)})
     if meta_date and meta_date.get("content"):
         item["publish_date"] = parse_chinese_date(meta_date["content"]) or item.get("publish_date", "")
     if not item.get("publish_date"):
         item["publish_date"] = parse_chinese_date(body_text[:3000]) or ""
     item["deadline"] = extract_reg_deadline(body_text, item.get("publish_date", "")) or ""
+    if item.get("publish_date") and item["publish_date"] < _recent_cutoff():
+        item["skip_reason"] = "发布超过三个月"  # 列表页没写日期的，打开后才知道，不再下载附件
+        return
 
     rows: list[str] = []
     checked: list[str] = []
+    failed: list[str] = []
     for name, link in find_attachments(soup, item["url"]):
         if not _robots_allowed(link):
             continue
         try:
             data = _fetch_bytes(link, referer=item["url"])
+        except HostPaused:
+            raise
         except FetchError:
             checked.append(f"{name}（下载失败）")
+            failed.append(name)
             continue
         checked.append(name)
         rows.extend(psych_rows_from_file(name, data))
@@ -346,6 +417,9 @@ def _inspect_announcement(item: dict, delay: float) -> None:
 
     if psych_hit(item["title"]) and not rows:
         rows.append(item["title"])
+    # 岗位表没下载成功又没找到心理岗：可能是漏看，记为失败，下次再试（否则会被当成"已检查、无心理岗"）
+    if failed and not rows:
+        raise FetchError(f"附件下载失败: {'、'.join(failed)[:80]}")
 
     item["attachments_checked"] = checked[:10]
     item["psych_rows"] = _dedupe(rows)[:MAX_ROWS_PER_ITEM]
@@ -353,6 +427,10 @@ def _inspect_announcement(item: dict, delay: float) -> None:
     item.pop("note", None)
     if not checked and not item["has_psych"]:
         item["note"] = "没找到可读取的附件，建议打开原文人工查看"
+
+
+def _recent_cutoff() -> str:
+    return (datetime.now(timezone.utc) - timedelta(days=RECENT_DAYS)).strftime("%Y-%m-%d")
 
 
 _DATE = r"(?:(20\d{2})\s*年)?\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日"
@@ -454,56 +532,92 @@ def _stat(url: str, key: str, err: Exception | None = None) -> None:
         st["last_error"] = str(err)[:160]
 
 
+# 个别网站对访问频率很敏感，单独放慢、少重试。
+# 珠海：短时间内请求多了（尤其是失败后连续重试）会封 IP 数小时，三个子站共用一套防火墙，按整个域名合并计算。
+HOST_POLICIES = {
+    "zhuhai.gov.cn": {"min_interval": 8.0, "max_attempts": 2, "max_fails": 3},
+}
+# min_interval：同一网站两次请求的最短间隔（秒）；max_attempts：每个网址最多换几种方式尝试；
+# max_fails：本次运行里连续失败几个网址后暂停访问该网站（None 表示不暂停）
+DEFAULT_POLICY = {"min_interval": 1.5, "max_attempts": 6, "max_fails": None}
+
+
+class HostPaused(FetchError):
+    """该网站本次运行里连续失败太多，已暂停访问（没有真正发出请求）。"""
+
+
+_HOST_STATE: dict[str, dict] = {}
+
+
+def _host_policy(url: str) -> tuple[str, dict]:
+    host = urlparse(url).netloc.split(":")[0].lower()
+    for suffix, policy in HOST_POLICIES.items():
+        if host == suffix or host.endswith("." + suffix):
+            return suffix, {**DEFAULT_POLICY, **policy}
+    return host, DEFAULT_POLICY
+
+
+def _throttle(key: str, min_interval: float) -> None:
+    st = _HOST_STATE.setdefault(key, {"last": 0.0, "fails": 0})
+    wait = st["last"] + min_interval - time.time()
+    if wait > 0:
+        time.sleep(wait + random.uniform(0, 0.5))
+    st["last"] = time.time()
+
+
 def _request(url: str, referer: str = "", max_bytes: int = 20_000_000, timeout: int = 30):
-    """依次尝试：浏览器模拟 → 普通方式 → 兼容模式 TLS → 换 http/https。返回 (内容, 最终网址, 编码)。"""
+    """依次尝试：浏览器模拟 → 普通方式 → 换 http/https → 兼容模式 TLS。返回 (内容, 最终网址, 编码)。
+
+    每个网站的请求间隔、尝试次数、连续失败后是否暂停，见 HOST_POLICIES。
+    """
+    key, policy = _host_policy(url)
+    st = _HOST_STATE.setdefault(key, {"last": 0.0, "fails": 0})
+    if policy["max_fails"] and st["fails"] >= policy["max_fails"]:
+        raise HostPaused(f"{key} 本次已连续失败 {st['fails']} 次，暂停访问: {url}")
+
     alt = _swap_scheme(url)
-    last: Exception | None = None
-
     sess = _session()
-    if sess is not None:
-        for u in (url, alt):
-            try:
-                headers = {"Accept-Language": "zh-CN,zh;q=0.9"}
-                if referer:
-                    headers["Referer"] = referer
-                r = sess.get(u, headers=headers, timeout=timeout, verify=False, allow_redirects=True)
-                if r.status_code == 200:
-                    _stat(url, "browser_ok")
-                    m = re.search(r"charset=([\w-]+)", r.headers.get("content-type", ""), re.I)
-                    return r.content[:max_bytes], str(r.url), (m.group(1) if m else None)
-                last = Exception(f"HTTP {r.status_code}")
-                if r.status_code in (404, 410):
-                    break
-            except Exception as e:  # noqa: BLE001
-                last = e
-            polite_delay(2.0, 0.8)
+    attempts: list[tuple[str, str, ssl.SSLContext | None]] = []
+    for u, ctx in ((url, _CTX), (alt, _CTX), (url, _LEGACY_CTX), (alt, _LEGACY_CTX)):
+        if sess is not None and ctx is _CTX:
+            attempts.append(("browser", u, None))
+        if ctx is _CTX or u.startswith("https://"):  # http 不涉及 TLS，兼容模式不必重复试
+            attempts.append(("urllib", u, ctx))
 
-    variants = [(url, _CTX), (url, _LEGACY_CTX), (alt, _CTX), (alt, _LEGACY_CTX)]
-    tried: set[str] = set()
-    for i, (u, ctx) in enumerate(variants):
-        sig = u if u.startswith("http://") else f"{u}|{id(ctx)}"
-        if sig in tried:
-            continue
-        tried.add(sig)
-        headers = {
-            "User-Agent": DEFAULT_UA,
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "zh-CN,zh;q=0.9",
-        }
+    last: Exception | None = None
+    gone = False
+    for kind, u, ctx in attempts[: policy["max_attempts"]]:
+        _throttle(key, policy["min_interval"])
+        headers = {"Accept-Language": "zh-CN,zh;q=0.9"}
         if referer:
             headers["Referer"] = referer
         try:
-            req = urllib.request.Request(u, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
-                _stat(url, "urllib_ok")
-                return resp.read(max_bytes), resp.geturl(), resp.headers.get_content_charset()
+            if kind == "browser":
+                r = sess.get(u, headers=headers, timeout=timeout, verify=False, allow_redirects=True)
+                if r.status_code == 200:
+                    _stat(url, "browser_ok")
+                    st["fails"] = 0
+                    m = re.search(r"charset=([\w-]+)", r.headers.get("content-type", ""), re.I)
+                    return r.content[:max_bytes], str(r.url), (m.group(1) if m else None)
+                last = Exception(f"HTTP {r.status_code}")
+                gone = r.status_code in (404, 410)
+            else:
+                headers["User-Agent"] = DEFAULT_UA
+                headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                req = urllib.request.Request(u, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
+                    _stat(url, "urllib_ok")
+                    st["fails"] = 0
+                    return resp.read(max_bytes), resp.geturl(), resp.headers.get_content_charset()
         except urllib.error.HTTPError as e:
             last = e
-            if e.code in (404, 410):
-                break
+            gone = e.code in (404, 410)
         except Exception as e:  # noqa: BLE001 - 连接被重置 / TLS 握手失败等，换方式再试
             last = e
-        polite_delay(1.5 + i, 0.8)
+        if gone:
+            break
+    if not gone:  # 404 是网址本身失效，不算网站拦截
+        st["fails"] += 1
     _stat(url, "fail", last)
     raise FetchError(f"GET 失败: {url} -> {last}")
 
@@ -707,6 +821,8 @@ def _robots_allowed(url: str) -> bool:
     base = f"{parts.scheme}://{parts.netloc}"
     if base not in _ROBOTS:
         rp = RobotFileParser()
+        key, policy = _host_policy(url)
+        _throttle(key, policy["min_interval"])
         try:
             req = urllib.request.Request(base + "/robots.txt", headers={"User-Agent": DEFAULT_UA})
             with urllib.request.urlopen(req, timeout=10, context=_CTX) as resp:
