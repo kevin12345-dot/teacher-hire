@@ -76,11 +76,10 @@ SITES = [
     {"name": "深圳福田区·招考专栏", "list_url": "https://www.szft.gov.cn/xxgk/ztbd/ftqzkzl/index.html", "city": "深圳"},
     {"name": "深圳龙华区·招考招聘", "list_url": "https://www.szlhq.gov.cn/xxgk/rsxx/zkzp/index.html", "city": "深圳"},
     {"name": "深圳龙华区教育局·招聘信息", "list_url": "http://www.szlhq.gov.cn/bmxxgk/jyj/dtxx_124232/zpxx/index.html", "city": "深圳"},
-    # ---- 珠海 ----
-    {"name": "珠海市教育局·人事信息", "list_url": "https://zhjy.zhuhai.gov.cn/zwgk/rsxx/index.html", "city": "珠海"},
-    {"name": "珠海市教育局·教师队伍", "list_url": "https://zhjy.zhuhai.gov.cn/ywgz/jsdw/index.html", "city": "珠海"},
-    {"name": "珠海市人社局·公职招考", "list_url": "https://zhrsj.zhuhai.gov.cn/zw/tzgg/gzzk/index.html", "city": "珠海"},
-    {"name": "珠海市政府·公职招考", "list_url": "https://www.zhuhai.gov.cn/zw/rsxx/gzzk/index.html", "city": "珠海"},
+    # ---- 珠海（请求稍多就封 IP 数天，只留两个列表页、只看第 1 页；
+    #      "教育局·人事信息""市政府·公职招考"与这两个内容重复，已去掉） ----
+    {"name": "珠海市人社局·公职招考", "list_url": "https://zhrsj.zhuhai.gov.cn/zw/tzgg/gzzk/index.html", "city": "珠海", "max_pages": 1},
+    {"name": "珠海市教育局·教师队伍", "list_url": "https://zhjy.zhuhai.gov.cn/ywgz/jsdw/index.html", "city": "珠海", "max_pages": 1},
     # ---- 东莞（这两个网站的 robots.txt 可能不允许爬取，会被自动跳过） ----
     {"name": "东莞市教育局·公示公告", "list_url": "https://edu.dg.gov.cn/jyzx/gsgg/index.html", "city": "东莞"},
     {"name": "东莞市人社局·公开招聘", "list_url": "https://dghrss.dg.gov.cn/xwzx/gsgg/gkzp/index.html", "city": "东莞"},
@@ -115,6 +114,7 @@ ATTACH_EXTS = (".xls", ".xlsx", ".et", ".doc", ".docx", ".wps", ".zip", ".pdf")
 ATTACH_SKIP_WORDS = [
     "专业参考目录", "专业目录", "操作说明", "咨询电话", "同意报考", "对照表", "资格审查", "审核资料",
     "承诺书", "报名表", "登记表", "问题的解答", "报名指南", "诚信", "授权书", "体检",
+    "报考指南", "监督电话",
 ]
 
 STATE_FILE = os.path.join(WEB_DATA_DIR, "gd-psych.json")
@@ -533,9 +533,10 @@ def _stat(url: str, key: str, err: Exception | None = None) -> None:
 
 
 # 个别网站对访问频率很敏感，单独放慢、少重试。
-# 珠海：短时间内请求多了（尤其是失败后连续重试）会封 IP 数小时，三个子站共用一套防火墙，按整个域名合并计算。
+# 珠海：1~2 分钟内十来个请求就会封 IP 数天（浏览器也打不开），各子站共用一套防火墙，按整个域名合并计算：
+# 每 30 秒最多一个请求、不重试、失败一次就停止本次访问
 HOST_POLICIES = {
-    "zhuhai.gov.cn": {"min_interval": 8.0, "max_attempts": 2, "max_fails": 3},
+    "zhuhai.gov.cn": {"min_interval": 30.0, "max_attempts": 1, "max_fails": 1},
 }
 # min_interval：同一网站两次请求的最短间隔（秒）；max_attempts：每个网址最多换几种方式尝试；
 # max_fails：本次运行里连续失败几个网址后暂停访问该网站（None 表示不暂停）
@@ -819,7 +820,7 @@ _ROBOTS: dict[str, RobotFileParser | None] = {}
 def _robots_allowed(url: str) -> bool:
     parts = urlparse(url)
     base = f"{parts.scheme}://{parts.netloc}"
-    if base not in _ROBOTS:
+    if parts.netloc not in _ROBOTS:  # 按域名缓存：同一站点的 http/https 只取一次
         rp = RobotFileParser()
         key, policy = _host_policy(url)
         _throttle(key, policy["min_interval"])
@@ -827,13 +828,13 @@ def _robots_allowed(url: str) -> bool:
             req = urllib.request.Request(base + "/robots.txt", headers={"User-Agent": DEFAULT_UA})
             with urllib.request.urlopen(req, timeout=10, context=_CTX) as resp:
                 rp.parse(resp.read(200_000).decode("utf-8", "ignore").splitlines())
-            _ROBOTS[base] = rp
+            _ROBOTS[parts.netloc] = rp
         except urllib.error.HTTPError as e:
             # 401/403：按惯例视为禁止；404 等：视为没有限制
-            _ROBOTS[base] = False if e.code in (401, 403) else None
+            _ROBOTS[parts.netloc] = False if e.code in (401, 403) else None
         except Exception:  # noqa: BLE001 - 取不到 robots.txt 时不阻塞
-            _ROBOTS[base] = None
-    rp = _ROBOTS[base]
+            _ROBOTS[parts.netloc] = None
+    rp = _ROBOTS[parts.netloc]
     if rp is False:
         return False
     if rp is None:
